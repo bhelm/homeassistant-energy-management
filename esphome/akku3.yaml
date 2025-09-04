@@ -1,0 +1,13 @@
+substitutions:
+  device_name: "akku3"
+  friendly_name: Akku3
+  device_description: ESP32 Marstek Battery System via RS485
+
+packages:
+  common: !include .common.yml
+  marstek-e: !include .marstek-e.yml
+
+wifi:
+  use_address: 192.168.2.223
+
+

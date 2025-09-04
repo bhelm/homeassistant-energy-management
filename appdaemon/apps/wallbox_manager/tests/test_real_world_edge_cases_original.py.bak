@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""
+Tests for real-world edge cases that can occur in production.
+These test scenarios focus on logic problems that can happen with real hardware and sensors.
+"""
+
+import sys
+import os
+import time
+import unittest
+from unittest.mock import Mock, MagicMock, patch
+
+# Add the directory containing the modules to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Create a mock for the hassapi module
+class MockHass:
+    class Hass:
+        def __init__(self):
+            self.args = {}
+            self.entity_states = {}
+            self.service_calls = []
+            self.log_messages = []
+            self.callbacks = {}
+            self.timer_callbacks = {}
+            self.current_time = time.time()
+        
+        def log(self, message):
+            self.log_messages.append(message)
+        
+        def get_state(self, entity_id):
+            value = self.entity_states.get(entity_id, "0")
+            # Handle unavailable/unknown values like the real system would
+            if value in ["unavailable", "unknown", "None"]:
+                return None
+            return value
+        
+        def set_state(self, entity_id, state=None, attributes=None):
+            if attributes:
+                self.entity_states[entity_id] = state
+                return True
+            else:
+                self.entity_states[entity_id] = state
+                return True
+        
+        def call_service(self, service, **kwargs):
+            self.service_calls.append((service, kwargs))
+        
+        def listen_state(self, callback, entity_id):
+            if entity_id not in self.callbacks:
+                self.callbacks[entity_id] = []
+            self.callbacks[entity_id].append(callback)
+        
+        def run_every(self, callback, start_time, interval):
+            # Mock implementation - just store the callback
+            pass
+        
+        def run_in(self, callback, seconds, **kwargs):
+            timer_id = f"timer_{len(self.timer_callbacks)}"
+            self.timer_callbacks[timer_id] = (callback, seconds, kwargs)
+            return timer_id
+        
+        def cancel_timer(self, timer_id):
+            if timer_id in self.timer_callbacks:
+                del self.timer_callbacks[timer_id]
+        
+        def get_now_ts(self):
+            return self.current_time
+        
+        def advance_time(self, seconds):
+            """Advance the mock time by the specified number of seconds."""
+            self.current_time += seconds
+            
+            # Check for timers that should fire
+            timers_to_fire = []
+            for timer_id, (callback, timer_seconds, kwargs) in self.timer_callbacks.items():
+                if timer_seconds <= seconds:
+                    timers_to_fire.append((timer_id, callback, kwargs))
+            
+            # Fire the timers and remove them
+            for timer_id, callback, kwargs in timers_to_fire:
+                callback(kwargs)
+                del self.timer_callbacks[timer_id]
+
+# Mock the hassapi module
+sys.modules['hassapi'] = MockHass
+
+from wallbox_manager.wallbox_manager import WallboxManager
+from wallbox_manager.wallbox_collection import WallboxCollection, WALLBOX_CONFIGS
+
+
+class TestRealWorldEdgeCases(unittest.TestCase):
+    """Test real-world edge cases that can occur in production."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.hass = MockHass.Hass()
+        self.hass.args = {
+            'ratio_dani_to_elli': 2.0,
+            'voltage': 230,
+            'sqrt_3': 1.0,
+            'min_current_a': 6,
+            'max_current_a': 16,
+            'buffer_watts': 100,
+            'max_power_change_per_cycle': 500,  # Realistic rate limiting
+            'timer_interval': 10,
+            'max_charging_attempts': 3,
+            'charging_retry_interval': 300,
+            'charging_power_threshold': 100
+        }
+        
+        # Create the app instance
+        self.manager = WallboxManager()
+        self.manager.hass = self.hass
+        self.manager.args = getattr(self, "args", {})
+        self.manager.initialize()
+        
+        # Set the args attribute that the initialize method expects
+        self.manager.args = self.hass.args
+        
+        # Patch the app's methods to use our mocked hass BEFORE calling initialize
+        self.manager.log = self.hass.log
+        self.manager.get_state = self.hass.get_state
+        self.manager.set_state = self.hass.set_state
+        self.manager.call_service = self.hass.call_service
+        self.manager.run_in = self.hass.run_in
+        self.manager.cancel_timer = self.hass.cancel_timer
+        self.manager.get_now_ts = self.hass.get_now_ts
+        self.manager.run_every = self.hass.run_every
+        self.manager.listen_state = self.hass.listen_state
+        
+        # Now call initialize to properly set up the refactored architecture
+        self.manager.initialize()
+        
+
+    def test_sensor_unavailable_values(self):
+        """Test handling of 'unavailable' or 'unknown' sensor values that occur in real Home Assistant."""
+        
+        # Set up entity states directly in the mock
+        self.hass.entity_states.update({
+            # Grid power sensor returns 'unavailable' (common HA issue)
+            "sensor.netz_gesamt_w": "unavailable",
+            
+            # Wallbox sensors also have real-world string values
+            "input_boolean.wallbox_dani_ueberschuss": "on",
+            "binary_sensor.warp2_22vo_daniel_cable": "on",
+            "binary_sensor.warp2_22vo_daniel_charging": "off",
+            "sensor.warp2_22vo_daniel_powernow": "unknown",  # Sensor issue
+            "number.warp2_22vo_daniel_globalcurrent": "0.0",
+            
+            "input_boolean.wallbox_elli_ueberschuss": "on",
+            "binary_sensor.warp2_22vo_elli_cable": "off",
+            "binary_sensor.warp2_22vo_elli_charging": "off",
+            "sensor.warp2_22vo_elli_powernow": "0.0",
+            "number.warp2_22vo_elli_globalcurrent": "0.0",
+        })
+        
+        # The system should handle this gracefully without crashing
+        try:
+            self.manager.manage_wallboxes(None, None, None, None, None)
+            test_passed = True
+        except (ValueError, TypeError):
+            test_passed = False
+        
+        self.assertTrue(test_passed, "System should handle unavailable/unknown sensor values gracefully")
+        
+        # Should log warnings about unavailable sensors (grid power state is None)
+        warning_logs = [str(message) for message in self.hass.log_messages
+                       if "WARNING" in str(message) and "Grid power state is None" in str(message)]
+        self.assertGreater(len(warning_logs), 0, "Should log warnings about unavailable sensor values")
+
+    def test_rate_limiting_during_gradual_power_ramp_down(self):
+        """Test rate limiting behavior during gradual power reduction (real solar cloud scenario)."""
+        
+        # Set up entity states directly in the mock
+        self.hass.entity_states.update({
+            # Moderate surplus reduction (cloud passing over solar panels)
+            "sensor.netz_gesamt_w": "2320.0",  # 2320W import (positive = import)
+            # This means -2320W surplus, after 100W buffer = -2420W available (deficit)
+            
+            # Dani: Currently charging at high current but will need to be stopped
+            "input_boolean.wallbox_dani_ueberschuss": "on",
+            "binary_sensor.warp2_22vo_daniel_cable": "on",
+            "binary_sensor.warp2_22vo_daniel_charging": "on",
+            "sensor.warp2_22vo_daniel_powernow": "3220.0",  # 14A × 230V = 3220W
+            "number.warp2_22vo_daniel_globalcurrent": "14.0",
+            
+            # Elli: Not connected
+            "input_boolean.wallbox_elli_ueberschuss": "on",
+            "binary_sensor.warp2_22vo_elli_cable": "off",
+            "binary_sensor.warp2_22vo_elli_charging": "off",
+            "sensor.warp2_22vo_elli_powernow": "0.0",
+            "number.warp2_22vo_elli_globalcurrent": "0.0",
+        })
+        
+        # Run the wallbox manager
+        self.manager.manage_wallboxes(None, None, None, None, None)
+        
+        # With deficit power (importing from grid), the wallbox should be stopped
+        stop_calls = [call for call in self.hass.service_calls
+                     if call[0] == "button/press" and "daniel_stopcharge" in str(call[1].get("entity_id", ""))]
+        
+        current_calls = [call for call in self.hass.service_calls
+                        if call[0] == "number/set_value" and
+                        "daniel_globalcurrent" in str(call[1].get("entity_id", "")) and
+                        call[1].get("value", 1) == 0]
+        
+        # Check the log messages to see if the decision logic worked correctly
+        decision_logs = [msg for msg in self.hass.log_messages
+                        if "DECISION:" in str(msg) and ("stopping" in str(msg).lower() or "insufficient" in str(msg).lower())]
+        
+        self.assertTrue(len(stop_calls) > 0 or len(current_calls) > 0 or len(decision_logs) > 0,
+                      f"Wallbox should be stopped when there's insufficient power. "
+                      f"Stop calls: {len(stop_calls)}, Current=0 calls: {len(current_calls)}, Decision logs: {len(decision_logs)}")
+
+    def test_both_wallboxes_at_minimum_with_power_shortage(self):
+        """Test behavior when both wallboxes are at minimum current but there's still insufficient power."""
+        
+        # Set up entity states directly in the mock
+        self.hass.entity_states.update({
+            # Very low surplus (realistic scenario with high background consumption)
+            "sensor.netz_gesamt_w": "-500.0",  # 500W surplus - 100W buffer = 400W available
+            # But minimum for two wallboxes = 2 × 6A × 230V = 2760W needed
+            
+            # Dani: At minimum current
+            "input_boolean.wallbox_dani_ueberschuss": "on",
+            "binary_sensor.warp2_22vo_daniel_cable": "on",
+            "binary_sensor.warp2_22vo_daniel_charging": "on",
+            "sensor.warp2_22vo_daniel_powernow": "1380.0",  # 6A × 230V
+            "number.warp2_22vo_daniel_globalcurrent": "6.0",
+            
+            # Elli: Also at minimum current
+            "input_boolean.wallbox_elli_ueberschuss": "on",
+            "binary_sensor.warp2_22vo_elli_cable": "on",
+            "binary_sensor.warp2_22vo_elli_charging": "on",
+            "sensor.warp2_22vo_elli_powernow": "1380.0",  # 6A × 230V
+            "number.warp2_22vo_elli_globalcurrent": "6.0",
+        })
+        
+        # Run the wallbox manager
+        self.manager.manage_wallboxes(None, None, None, None, None)
+        
+        # With 400W available but needing 2760W minimum, prioritization should kick in
+        # Higher priority wallbox (Dani with ratio 2.0) should get power, Elli should be stopped
+        
+        elli_stop_calls = [call for call in self.hass.service_calls
+                          if call[0] == "button/press" and "elli_stopcharge" in str(call[1].get("entity_id", ""))]
+        
+        # Also check for current being set to 0
+        elli_current_calls = [call for call in self.hass.service_calls
+                             if call[0] == "number/set_value" and
+                             "elli_globalcurrent" in str(call[1].get("entity_id", "")) and
+                             call[1].get("value", 1) == 0]
+        
+        self.assertTrue(len(elli_stop_calls) > 0 or len(elli_current_calls) > 0,
+                      "Lower priority wallbox should be stopped when insufficient power for both")
+
+
+if __name__ == '__main__':
+    unittest.main()

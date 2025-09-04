@@ -1,0 +1,114 @@
+
+# Energy Distribution Tracking
+energy_distributor:
+  module: energy_distributor
+  class: EnergyDistributor
+  update_interval: 10
+  min_consumption_threshold: 10
+  grid_power_sensor: sensor.netz_bezug_w
+  pv_power_sensor: sensor.gesamt_pv_w
+  devices:
+    battery_combined:
+      power_sensor: sensor.akku_charging_in_w
+      friendly_name: "Combined Battery Charging"
+
+# Battery Savings Tracker - Financial tracking of battery energy flows
+battery_savings_tracker:
+  module: battery_savings_tracker.battery_savings_tracker
+  class: BatterySavingsTracker
+  update_interval: 301  # 5 minutes - matches energy distributor update frequency
+  pv_surplus_rate_ct: 7.8  # Cost of PV surplus charging: 7.8ct/kWh
+  
+  # Input sensor configuration (configurable sensor names)
+  battery_pv_energy_sensor: sensor.battery_combined_pv_energy  # PV energy used for battery charging
+  battery_grid_energy_sensor: sensor.battery_combined_grid_energy  # Grid energy used for battery charging
+  battery_discharge_sensor: sensor.combined_battery_total_discharging_kwh  # Total battery discharge energy
+  tibber_price_sensor: sensor.tibber_future_statistics  # Tibber price sensor for dynamic pricing
+  
+  # Note: Grid charging cost and discharge savings use dynamic Tibber pricing
+  # Dependencies: Requires energy_distributor app to be running for PV/Grid energy split
+  # Creates sensors: battery_total_money_saved_eur, battery_pv_charging_cost_eur,
+  #                 battery_grid_charging_cost_eur, battery_discharge_savings_eur
+
+# Wallbox Manager
+wallbox_manager:
+  module: wallbox_manager.wallbox_manager
+  class: WallboxManager
+  ratio_dani_to_elli: 10.0
+  voltage: 225.00
+  sqrt_3: 1.0
+  min_current_a: 6
+  max_current_a: 32
+  buffer_watts: 100
+  # Battery power integration - wallboxes get priority over battery charging
+  battery_power_sensor: sensor.battery_manager_actual_power
+
+# Battery Manager
+battery_manager:
+  module: battery_manager.battery_manager
+  class: BatteryManager
+  update_interval: 2
+  batteries:
+    - name: Akku1
+      type: marstek
+      device_prefix: akku1
+    - name: Akku2
+      type: marstek
+      device_prefix: akku2
+    - name: Akku3
+      type: marstek
+      device_prefix: akku3
+
+# Grid Balancer - Simple grid power balancing using battery storage
+grid_balancer:
+  module: grid_balancer.grid_balancer
+  class: GridBalancer
+  grid_sensor: sensor.netz_gesamt_w
+  battery_target_entity: input_number.battery_manager_target_power
+  enabled_entity: input_boolean.grid_balancer_enabled
+  allow_wallbox_battery_use_entity: input_boolean.grid_balancer_allow_wallbox_battery_use
+  surplus_buffer_w: 50  # Maintain 50W export to grid as buffer (target: -50W)
+  # FAST SENSOR POLLING CONFIGURATION (500ms polling)
+  use_fast_sensor_polling: true  # Use integrated fast sensor polling
+  poll_interval_ms: 500  # 500ms polling
+
+  # Anti-oscillation settings
+  max_adjustment_w: 2500 # Max adjustment size for stability - increased for large loads
+  max_adjustment_interval_s: 20 # Force adjustment after 20s regardless of power change
+  # Simple adjustment controller settings
+  adjustment_cooldown_s: 2.0  # Simple cooldown between ALL adjustments (increased to stop oscillation)
+  # Anti-oscillation tuning
+  deadband_w: 100        # Increased deadband - only react to changes >100W (was 50W)
+  
+  # Simplified Wallbox Priority Configuration
+  wallbox_priority:
+    enabled: true                                     # Enable simplified wallbox priority over battery charging
+    wallbox_power_sensor: sensor.gesamt_wallboxen_w  # Sensor for actual wallbox power consumption
+    wallbox_power_threshold_w: 100                   # Minimum power to consider wallbox "active" (W)
+    wallbox_reserve_power_w: 0                    # Power to reserve when wallbox is active (W)
+  
+  # Enhanced Oscillation Detection Configuration
+  oscillation_detection:
+    enabled: true                       # ENABLED - Master enable/disable switch
+    min_amplitude_w: 150              # Minimum 150W swing to detect oscillation (handles ±100W oscillations)
+    min_cycles: 2                     # Need at least 2 complete cycles
+    max_cycle_duration_s: 8           # Max 8s per cycle (for 3s on/off = 6s cycle)
+    history_duration_s: 30            # Keep 30s of power history
+    stabilization_factor: 1.1         # Discharge 110% of amplitude for safety
+    # Enhanced baseline tracking parameters
+    baseline_smoothing_factor: 0.6    # How quickly to adapt to baseline changes (0-1) - increased for much faster load change response
+    baseline_shift_threshold_w: 150   # Minimum shift to trigger baseline adaptation (W) - reduced for smaller oscillations
+    # NEW: Damping factor configuration for oscillation handling
+    damping_factor: 0.5               # 0.0 = min discharge, 1.0 = max discharge, 0.5 = balanced
+    damping_strategy: "proportional"  # "proportional", "min", "max", "average"
+
+
+# Sensor Latency Tester
+#sensor_latency_tester:
+#  module: sensor_latency_tester
+#  class: SensorLatencyTester
+#  test_sensor: input_number.latency_test_sensor
+#  test_interval: 1  # seconds between tests
+#  max_latency_ms: 900  # maximum expected latency in milliseconds
+#  log_level: INFO
+#  statistics_window: 10  # number of measurements for statistics
