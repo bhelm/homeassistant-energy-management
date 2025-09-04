@@ -1,0 +1,186 @@
+
+sensor:
+
+input_boolean:
+  wallbox_dani_ueberschuss:
+    name: Dani Überschussladen
+    icon: mdi:light-switch
+
+  wallbox_elli_ueberschuss:
+    name: Elli Überschussladen
+    icon: mdi:light-switch
+
+  
+  battery_manager_enabled:
+    name: Battery Manager Enabled
+    icon: mdi:power
+
+  grid_balancer_enabled:
+    name: Grid Balancer Enabled
+    icon: mdi:scale-balance
+
+  grid_balancer_allow_wallbox_battery_use:
+    name: Allow Wallbox to use Battery
+    icon: mdi:power
+
+input_number:
+  dani_charge_command_timestamp:
+    name: "Last Dani Charge Command Timestamp"
+    min: 0
+    max: 9999999999
+    step: 1
+    icon: mdi:timer
+
+  elli_charge_command_timestamp:
+    name: "Last Elli Charge Command Timestamp"
+    min: 0
+    max: 9999999999
+    step: 1
+    icon: mdi:timer
+
+  battery_manager_target_power:
+    name: "Battery Manager Target Power"
+    min: -7500
+    max: 7500
+    step: 50
+    unit_of_measurement: "W"
+    icon: mdi:battery-charging
+
+  latency_test_sensor:
+    name: "Latency Test Sensor"
+    min: 0
+    max: 1000000
+    step: 1
+    icon: mdi:speedometer
+
+template:
+
+  - sensor:
+      - name: "Akku1 Charging in W"
+        unique_id: akku1_charging_in_w
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: >
+          {% if states('sensor.akku1_ac_power') | float(0) < 0 %}
+            {{ (states('sensor.akku1_ac_power') | float(0)) *-1 }}
+          {% else %}
+            0
+          {% endif %}
+          
+      - name: "Akku1 Discharging in W"
+        unique_id: akku1_discharging_in_w
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: >
+          {% if states('sensor.akku1_ac_power') | float(0) > 0 %}
+            {{ (states('sensor.akku1_ac_power') | float(0)) }}
+          {% else %}
+            0
+          {% endif %}
+      - name: "Akku1 Efficiency Percentage"
+        unique_id: akku1_efficiency_percentage
+        unit_of_measurement: "%"
+        state_class: measurement
+        state: >
+          {% set charging = states('sensor.akku1_daily_charging_in_kwh') | float(0) %}
+          {% set discharging = states('sensor.akku1_daily_discharging_in_kwh') | float(0) %}
+          {% if charging > 0 %}
+            {{ ((discharging / charging) * 100) | int }}
+          {% else %}
+            0
+          {% endif %}
+
+    # Kombiniert
+      - name: "Akku Charging in W"
+        unique_id: akku_charging_in_w
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set akku1 = states('sensor.akku1_ac_power') | float(0) %}
+          {% set akku2 = states('sensor.akku2_ac_power') | float(0) %}
+          {% set akku3 = states('sensor.akku3_ac_power') | float(0) %}
+          {% set total = 0 %}
+          {% if akku1 < 0 %}
+            {% set total = total + (akku1 * -1) %}
+          {% endif %}
+          {% if akku2 < 0 %}
+            {% set total = total + (akku2 * -1) %}
+          {% endif %}
+          {% if akku3 < 0 %}
+            {% set total = total + (akku3 * -1) %}
+          {% endif %}
+          {{ total }}
+          
+      - name: "Akku Discharging in W"
+        unique_id: akku_discharging_in_w
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set akku1 = states('sensor.akku1_ac_power') | float(0) %}
+          {% set akku2 = states('sensor.akku2_ac_power') | float(0) %}
+          {% set akku3 = states('sensor.akku3_ac_power') | float(0) %}
+          {% set total = 0 %}
+          {% if akku1 > 0 %}
+            {% set total = total + akku1 %}
+          {% endif %}
+          {% if akku2 > 0 %}
+            {% set total = total + akku2 %}
+          {% endif %}
+          {% if akku3 > 0 %}
+            {% set total = total + akku3 %}
+          {% endif %}
+          {{ total }}
+          
+      - name: "Akku Efficiency Percentage"
+        unique_id: akku_efficiency_percentage
+        unit_of_measurement: "%"
+        state_class: measurement
+        state: >
+          {% set charging1 = states('sensor.akku1_daily_charging_in_kwh') | float(0) %}
+          {% set charging2 = states('sensor.akku2_daily_charging_in_kwh') | float(0) %}
+          {% set charging3 = states('sensor.akku3_daily_charging_in_kwh') | float(0) %}
+          {% set discharging1 = states('sensor.akku1_daily_discharging_in_kwh') | float(0) %}
+          {% set discharging2 = states('sensor.akku2_daily_discharging_in_kwh') | float(0) %}
+          {% set discharging3 = states('sensor.akku3_daily_discharging_in_kwh') | float(0) %}
+          {% set total_charging = charging1 + charging2 + charging3 %}
+          {% set total_discharging = discharging1 + discharging2 + discharging3 %}
+          {% if total_charging > 0 %}
+            {{ ((total_discharging / total_charging) * 100) | int }}
+          {% else %}
+            0
+          {% endif %}
+
+      # Combined battery energy sensors for savings tracker
+      - name: "Combined Battery Total Charging kWh"
+        unique_id: combined_battery_total_charging_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: >
+          {{ (states('sensor.akku1_total_charging_energy') | float(0) +
+              states('sensor.akku2_total_charging_energy') | float(0) +
+              states('sensor.akku3_total_charging_energy') | float(0)) | round(3) }}
+        attributes:
+          friendly_name: "Combined Battery Total Charging"
+          icon: "mdi:battery-charging"
+
+      - name: "Combined Battery Total Discharging kWh"
+        unique_id: combined_battery_total_discharging_kwh
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: >
+          {{ (states('sensor.akku1_total_discharging_energy') | float(0) +
+              states('sensor.akku2_total_discharging_energy') | float(0) +
+              states('sensor.akku3_total_discharging_energy') | float(0)) | round(3) }}
+        attributes:
+          friendly_name: "Combined Battery Total Discharging"
+          icon: "mdi:battery-arrow-down"
+
+
+
+
